@@ -6,20 +6,17 @@ import {
   friendlyMessage,
   downloadBlob,
   filenameFromContentDisposition,
-  logout as doLogout,
-  ApiError,
 } from './auth';
 
 /*
- * ExportPanel — checkbox list of NocoDB tables, Excel/CSV download.
+ * ExportPanel — checkbox list of NocoDB tables, multi-sheet Excel
+ * download, per-row CSV download.
  *
- * Props:
- *   user            — { id, email, role } from /api/auth/login or /api/auth/me
- *   onUnauthenticated() — called if a request returns 401 (token cleared).
- *                         Use it to flip the parent back to <LoginPage/>.
+ * Login is owned by the main app. On 401, handleApiResponse() bounces
+ * the browser to the main app's login URL (configured in ./auth.js).
  */
 
-export default function ExportPanel({ user, onUnauthenticated }) {
+export default function ExportPanel() {
   const [tables, setTables] = useState([]);
   const [loadingTables, setLoadingTables] = useState(true);
   const [tablesError, setTablesError] = useState(null);
@@ -29,18 +26,6 @@ export default function ExportPanel({ user, onUnauthenticated }) {
   const [exportError, setExportError] = useState(null);
 
   const [csvBusy, setCsvBusy] = useState(null);
-  const [loggingOut, setLoggingOut] = useState(false);
-
-  const handleAuthFailure = useCallback(
-    (err) => {
-      if (err instanceof ApiError && err.code === 'unauthorized') {
-        if (typeof onUnauthenticated === 'function') onUnauthenticated();
-        return true;
-      }
-      return false;
-    },
-    [onUnauthenticated]
-  );
 
   useEffect(() => {
     let cancelled = false;
@@ -56,9 +41,7 @@ export default function ExportPanel({ user, onUnauthenticated }) {
         const body = await res.json();
         if (!cancelled) setTables(Array.isArray(body.tables) ? body.tables : []);
       } catch (err) {
-        if (cancelled) return;
-        if (handleAuthFailure(err)) return;
-        setTablesError(friendlyMessage(err));
+        if (!cancelled) setTablesError(friendlyMessage(err));
       } finally {
         if (!cancelled) setLoadingTables(false);
       }
@@ -66,7 +49,7 @@ export default function ExportPanel({ user, onUnauthenticated }) {
     return () => {
       cancelled = true;
     };
-  }, [handleAuthFailure]);
+  }, []);
 
   const allIds = useMemo(() => tables.map((t) => t.id), [tables]);
   const allSelected = selected.size > 0 && selected.size === allIds.length;
@@ -105,77 +88,41 @@ export default function ExportPanel({ user, onUnauthenticated }) {
       );
       downloadBlob(blob, filename);
     } catch (err) {
-      if (handleAuthFailure(err)) return;
       setExportError(friendlyMessage(err));
     } finally {
       setExporting(false);
     }
-  }, [exporting, selected, handleAuthFailure]);
+  }, [exporting, selected]);
 
-  const exportCsv = useCallback(
-    async (table) => {
-      if (csvBusy) return;
-      setCsvBusy(table.id);
-      setExportError(null);
-      try {
-        const res = await fetch(
-          `${EXPORTS_BASE_URL}/api/exports/csv/${encodeURIComponent(table.id)}`,
-          {
-            method: 'GET',
-            headers: authHeaders({ Accept: 'text/csv' }),
-          }
-        );
-        await handleApiResponse(res);
-        const blob = await res.blob();
-        const filename = filenameFromContentDisposition(
-          res.headers.get('content-disposition'),
-          `${table.name}-${Date.now()}.csv`
-        );
-        downloadBlob(blob, filename);
-      } catch (err) {
-        if (handleAuthFailure(err)) return;
-        setExportError(friendlyMessage(err));
-      } finally {
-        setCsvBusy(null);
-      }
-    },
-    [csvBusy, handleAuthFailure]
-  );
-
-  const handleLogout = useCallback(async () => {
-    if (loggingOut) return;
-    setLoggingOut(true);
+  const exportCsv = useCallback(async (table) => {
+    if (csvBusy) return;
+    setCsvBusy(table.id);
+    setExportError(null);
     try {
-      await doLogout();
+      const res = await fetch(
+        `${EXPORTS_BASE_URL}/api/exports/csv/${encodeURIComponent(table.id)}`,
+        {
+          method: 'GET',
+          headers: authHeaders({ Accept: 'text/csv' }),
+        }
+      );
+      await handleApiResponse(res);
+      const blob = await res.blob();
+      const filename = filenameFromContentDisposition(
+        res.headers.get('content-disposition'),
+        `${table.name}-${Date.now()}.csv`
+      );
+      downloadBlob(blob, filename);
+    } catch (err) {
+      setExportError(friendlyMessage(err));
     } finally {
-      setLoggingOut(false);
-      if (typeof onUnauthenticated === 'function') onUnauthenticated();
+      setCsvBusy(null);
     }
-  }, [loggingOut, onUnauthenticated]);
+  }, [csvBusy]);
 
   return (
     <div className="export-panel" style={{ padding: 16, maxWidth: 640, margin: '0 auto' }}>
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'baseline',
-          justifyContent: 'space-between',
-          marginBottom: 12,
-        }}
-      >
-        <h2 style={{ margin: 0 }}>Export placement data</h2>
-        {user && (
-          <div style={{ fontSize: 14, color: '#555' }}>
-            <span style={{ marginRight: 12 }}>
-              {user.email}
-              {user.role ? ` · ${user.role}` : ''}
-            </span>
-            <button type="button" onClick={handleLogout} disabled={loggingOut}>
-              {loggingOut ? 'Signing out…' : 'Sign out'}
-            </button>
-          </div>
-        )}
-      </div>
+      <h2 style={{ marginTop: 0 }}>Export placement data</h2>
 
       {loadingTables && <p>Loading tables…</p>}
       {tablesError && (

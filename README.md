@@ -1,8 +1,8 @@
 # Placement Exports Service
 
-A standalone Node.js/Express microservice that lets authorized users (TPO, admins) export placement data from NocoDB into Excel or CSV files. The service is **read-only** to the database, **API-only**, and ships with its own login + JWT auth (no dependency on any other backend).
+A standalone Node.js/Express microservice that lets authorized users (TPO, admins) export placement data from NocoDB into Excel or CSV files.
 
-It is designed to be deployed via Dokploy's **GitHub → Compose** flow.
+This service is a **pure resource server**: the **main backend** (your existing app's API) owns login and sessions. Every request to this service forwards its auth token to the main backend's verify endpoint and trusts whatever user/role comes back. No second login form, no second user list, no second password store.
 
 ---
 
@@ -11,74 +11,113 @@ It is designed to be deployed via Dokploy's **GitHub → Compose** flow.
 | Endpoint | Auth | Purpose |
 | --- | --- | --- |
 | `GET /health` | none | Liveness probe |
-| `POST /api/auth/login` | none (rate-limited per IP) | Body: `{email, password}`. Returns a JWT |
-| `GET /api/auth/me` | required | Returns `{user}` derived from the JWT |
-| `POST /api/auth/logout` | required | Audit-logs the event (JWT is stateless; client just drops it) |
 | `GET /api/exports/tables` | required | Lists `{id, name}` of all NocoDB tables in the configured base |
 | `POST /api/exports/excel` | required | Body: `{ "tableIds": ["..."] }`. Streams a multi-sheet `.xlsx` |
 | `GET /api/exports/csv/:tableId` | required | Streams a single CSV |
 
-Auth header: `Authorization: Bearer <jwt>`. Every authenticated request emits one JSON audit log line on stdout.
+Default auth header: `Authorization: Bearer <token>`. Configurable. Every authenticated request emits one JSON audit log line on stdout.
 
 ---
 
 ## Architecture
 
 ```
-React frontend ──Bearer JWT──▶ exports-service ──xc-token──▶ NocoDB ──▶ Postgres (read-only user)
-                                       │
-                                       └── verifies the JWT locally with HS256 + JWT_SECRET
+React frontend
+   │
+   │  Authorization: Bearer <token>
+   ▼
+exports-service ──── server-to-server verify ────▶ main backend  (/api/auth/me)
+   │                                                  │
+   │  xc-token                                        └─ returns { user: {id,email,role} }
+   ▼
+NocoDB ──▶ Postgres (read-only role)
 ```
 
-- **No DB write access.** All data is read through NocoDB's REST API. The Postgres role NocoDB uses is read-only.
-- **No external auth dependency.** Users are stored as bcrypt-hashed entries in `USERS_JSON`. JWTs are signed and verified locally with `JWT_SECRET`.
+- **No DB write access.** All data is read through NocoDB's REST API, which connects with a read-only Postgres user.
+- **No standalone auth.** This service never sees passwords. It only forwards tokens to the main backend.
+
+---
+
+## Connect to the main backend
+
+The exports service calls **one** endpoint on the main backend to verify each request. You don't need to add anything to the main backend if it already has a "who am I" endpoint.
+
+### Step 1 — find the verify endpoint
+
+Anything that takes the user's token and returns the user object will do. Common shapes:
+
+```
+GET /api/auth/me            → { id, email, role }
+GET /api/auth/me            → { user: { id, email, role } }
+GET /api/users/current      → { data: { id, email, role } }
+```
+
+The middleware unwraps `{user:{...}}`, `{data:{...}}`, or root-level objects automatically. Field names are configurable.
+
+### Step 2 — pick the URL
+
+Use the **internal Docker hostname**, not the public URL — it's faster, doesn't go through Cloudflare/Traefik, and doesn't depend on DNS.
+
+| Where the main backend runs | `MAIN_BACKEND_URL` |
+| --- | --- |
+| Same VPS, same Docker network (`placement-network`) | `http://<service-or-container-name>:<internal-port>` (e.g. `http://main-backend:3000`) |
+| Same VPS, different network | Add this service's container to that network in `docker-compose.yml`, then use the internal name |
+| Different host | `https://api.sumantheluri.tech` (public URL) |
+
+To find the right name on the VPS:
+
+```bash
+docker network inspect placement-network --format '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}'
+docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'
+```
+
+### Step 3 — configure these env vars in Dokploy
+
+| Variable | Example | What it is |
+| --- | --- | --- |
+| `MAIN_BACKEND_URL` | `http://main-backend:3000` | Base URL (no trailing slash) |
+| `MAIN_BACKEND_VERIFY_PATH` | `/api/auth/me` | Path on the main backend |
+| `AUTH_HEADER_NAME` | `Authorization` | Header the frontend sends |
+| `AUTH_HEADER_PREFIX` | `Bearer` | Prefix before the token, or empty |
+| `AUTH_USER_ID_FIELD` | `id` | Where the user id lives in the response |
+| `AUTH_USER_EMAIL_FIELD` | `email` | Where the user email lives |
+| `AUTH_USER_ROLE_FIELD` | `role` | Where the role lives |
+| `ALLOWED_ROLES` | `admin,tpo` | Comma-separated; case-insensitive |
+
+### Step 4 — verify it works
+
+From the **VPS shell** (inside the Docker network), reproduce the call the exports service will make:
+
+```bash
+docker exec -it placement-exports sh -c \
+  'wget -qO- --header="Authorization: Bearer $REAL_TOKEN" "$MAIN_BACKEND_URL$MAIN_BACKEND_VERIFY_PATH"'
+```
+
+You should see the user JSON. If you get `Connection refused`: wrong hostname/port, or the two services aren't on the same network. If you get 404: wrong path. If you get 401: token is wrong (try a fresh one from the main app).
 
 ---
 
 ## Environment variables
 
-See [`.env.example`](./.env.example) for the full list with comments. Required at startup:
+See [`.env.example`](./.env.example) for the full list with comments. Required at startup (the process exits with a clear error if any are missing):
 
 - `NODE_ENV`, `PORT`, `CORS_ORIGINS`
-- `JWT_SECRET` (>= 32 chars; generate with `openssl rand -base64 64`)
-- `USERS_JSON` (single-line JSON array of user records)
+- `MAIN_BACKEND_URL`, `MAIN_BACKEND_VERIFY_PATH`
+- `AUTH_HEADER_NAME`, `AUTH_USER_ID_FIELD`, `AUTH_USER_EMAIL_FIELD`, `AUTH_USER_ROLE_FIELD`
 - `ALLOWED_ROLES`
 - `NOCODB_URL`, `NOCODB_TOKEN`, `NOCODB_BASE_ID`
 
 Tunable (defaults shown):
 
-- `JWT_EXPIRES_IN=12h`, `JWT_ISSUER=placement-exports`
+- `AUTH_HEADER_PREFIX=Bearer`
 - `MAX_TABLES_PER_EXPORT=10`
 - `MAX_ROWS_PER_TABLE=100000`
 - `RATE_LIMIT_EXPORTS_PER_HOUR=10`
 - `RATE_LIMIT_LISTS_PER_HOUR=60`
-- `RATE_LIMIT_LOGIN_PER_15MIN=10`
+- `VERIFY_CACHE_TTL_SECONDS=0` (disabled; max 60)
 - `LOG_LEVEL=info`
 
 `CORS_ORIGINS` is a comma-separated allowlist of exact origins (no wildcards).
-
-### USERS_JSON format
-
-```json
-[
-  {"email": "admin@bms.in",  "passwordHash": "$2a$12$...", "role": "admin"},
-  {"email": "tpo@bms.in",    "passwordHash": "$2a$12$...", "role": "tpo"}
-]
-```
-
-- `email` — used for login and shown in audit logs.
-- `passwordHash` — bcrypt hash. **Never** put a plaintext password here.
-- `role` — must match one of `ALLOWED_ROLES` (case-insensitive) for the user to be allowed to export.
-- `id` — optional; defaults to the email.
-
-### Hashing a password
-
-```bash
-node scripts/hash-password.js 'their-strong-password'
-# → $2a$12$....
-```
-
-Wrap the password in single quotes so the shell doesn't expand `$`, `!`, etc. Minimum 12 characters enforced.
 
 ---
 
@@ -94,14 +133,7 @@ The service listens on `http://localhost:3000`. Smoke test:
 
 ```bash
 curl -fsS http://localhost:3000/health
-
-# Log in
-TOKEN=$(curl -fsS -X POST http://localhost:3000/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"admin@bms.in","password":"your-password"}' | jq -r .token)
-
-# Use it
-curl -fsS -H "Authorization: Bearer $TOKEN" http://localhost:3000/api/exports/tables
+curl -fsS -H "Authorization: Bearer <real-token>" http://localhost:3000/api/exports/tables
 ```
 
 Run a security audit before pushing:
@@ -116,9 +148,7 @@ npm run audit
 
 ### 1. Push to GitHub
 
-1. Create a new **private** repo, e.g. `placement-exports-service`.
-2. Push this folder. Confirm `.env` is **not** in the diff (`git status` should show only `.env.example`).
-3. Branch: `main`.
+This repo is already at `https://github.com/jayanthgopala/nocode-frontend-and-backend`. Push subsequent changes to `main`.
 
 ### 2. Create the Compose service in Dokploy
 
@@ -129,14 +159,13 @@ npm run audit
 
 ### 3. Paste environment variables
 
-In the **Environment** tab, add every variable from `.env.example`. The `JWT_SECRET`, `USERS_JSON`, and `NOCODB_TOKEN` must be the real values here — never in the repo.
+In the **Environment** tab, add every variable from `.env.example`. The `NOCODB_TOKEN` must be the real token here — never in the repo.
 
 Sanity checks:
 
 - `CORS_ORIGINS` matches the exact frontend origin (scheme + host, no trailing slash).
-- `JWT_SECRET` is at least 32 chars and was freshly generated for this deploy.
-- `USERS_JSON` parses (test locally first: `node -e 'JSON.parse(process.env.USERS_JSON)'`).
-- Each entry's `role` is in `ALLOWED_ROLES`.
+- `MAIN_BACKEND_URL` is reachable **from inside the Dokploy network**. Use the internal Docker hostname when both services share a network.
+- `ALLOWED_ROLES` matches the strings the main backend actually returns (case-insensitive match, but exact spelling).
 
 ### 4. Networks
 
@@ -146,6 +175,8 @@ The compose file attaches to two external networks: `placement-network` and `dok
 docker network create placement-network
 ```
 
+The main backend's container must also be on `placement-network` for the internal-hostname call to work. If it isn't, add it (in the main backend's `docker-compose.yml`) or use the public URL.
+
 ### 5. Domain + DNS
 
 1. **Cloudflare**: add A record `exports` → VPS IP. Proxy as you do for the rest of the stack.
@@ -154,23 +185,18 @@ docker network create placement-network
 
 ### 6. Deploy + verify
 
-1. Click **Deploy**. Wait for the container to come up.
-2. Tail logs in Dokploy. You should see one JSON line: `"exports service listening"`.
-3. Smoke test from your laptop:
+1. Click **Deploy**. Tail logs in Dokploy. Expect one JSON line: `"exports service listening"` showing `mainBackendVerify` and `allowedRoles`.
+2. Smoke test from your laptop:
    ```bash
    curl -fsS https://exports.sumantheluri.tech/health
    # → {"status":"ok",...}
 
-   TOKEN=$(curl -fsS -X POST https://exports.sumantheluri.tech/api/auth/login \
-     -H 'Content-Type: application/json' \
-     -d '{"email":"admin@bms.in","password":"..."}' | jq -r .token)
-
-   curl -fsS -H "Authorization: Bearer $TOKEN" \
+   curl -fsS \
+     -H "Authorization: Bearer <real-token-from-main-app>" \
      https://exports.sumantheluri.tech/api/exports/tables
    ```
-4. Without a token: must return `401 unauthorized`.
-5. With a JWT for a user whose role is not in `ALLOWED_ROLES`: must return `403 forbidden`.
-6. Wrong password 11 times in a row from one IP: must return `429 rate_limited`.
+3. Without a token: must return `401 unauthorized`.
+4. With a valid token whose role isn't in `ALLOWED_ROLES`: must return `403 forbidden`.
 
 ### 7. Auto-deploy
 
@@ -180,54 +206,42 @@ In Dokploy's **Deployments** tab, enable the GitHub webhook. Pushes to `main` re
 
 ## Frontend integration
 
-Drop-in React files under `frontend/` (copy them into the existing app, same folder, then import):
+Two drop-in files under `frontend/`:
 
 | File | Purpose |
 | --- | --- |
-| `auth.js` | Shared helpers: token storage, `fetch` wrappers, `login()` / `logout()` / `fetchCurrentUser()`, error mapping. **All config (base URL, storage key) lives here — adjust once.** |
-| `LoginPage.jsx` | Email/password form. Props: `onLoginSuccess(user)`. |
-| `ExportPanel.jsx` | Table list + Excel/CSV download + sign-out button. Props: `user`, `onUnauthenticated()`. |
-| `ExportApp.jsx` | Optional one-line drop-in that picks Login vs Panel based on the stored JWT (calls `/api/auth/me` on mount). Use this if you don't have routing for the exports feature. |
+| `auth.js` | `EXPORTS_BASE_URL`, `MAIN_APP_LOGIN_URL`, `getAuthToken()`, `authHeaders()`, `handleApiResponse()` (auto-redirects to login on 401), `friendlyMessage()`, `downloadBlob()`. **All config lives here — adjust once.** |
+| `ExportPanel.jsx` | Checkbox list + Excel/CSV download. No login UI. |
 
 What to edit in `auth.js`:
 
-- **`EXPORTS_BASE_URL`** — point at `https://exports.sumantheluri.tech`. You can also set `window.__EXPORTS_BASE_URL__` before the bundle loads (e.g. in `index.html`) and leave the file untouched.
-- **`STORAGE_KEY`** — defaults to `placement_exports_token`. Change only if it collides with something else in the existing app.
+- **`EXPORTS_BASE_URL`** — point at `https://exports.sumantheluri.tech`. Or set `window.__EXPORTS_BASE_URL__` before the bundle loads and leave the file untouched.
+- **`MAIN_APP_LOGIN_URL`** — where to bounce a 401 to (defaults to `/login`).
+- **`getAuthToken()`** — replace the `localStorage.getItem('authToken')` placeholder with whatever the main app uses (auth context, redux, cookie). The token returned here is forwarded as-is to the main backend's verify endpoint, so it must be the same token the main app issues.
 
-If you already have an auth context / cookie-based session in the existing app, replace the four storage helpers (`getAuthToken`, `storeAuthToken`, `clearAuthToken`, `authHeaders`) with calls into your context. Everything else (`login`, `fetchCurrentUser`, `logout`, the components) is built on top of those four.
-
-Behavior already wired:
-
-- 401 → token cleared, `onUnauthenticated()` fires, user lands back on login.
-- 403 / 413 / 429 / network errors → user-facing messages from `friendlyMessage()`.
-- Excel/CSV downloads → triggered via blob + `<a download>` with the filename from `Content-Disposition`.
+The component handles 401 (redirect via `MAIN_APP_LOGIN_URL`), 403, 429, 413, and network errors with friendly messages.
 
 ---
 
 ## Security notes
 
-- **Local JWT auth.** HS256, configurable expiry, configurable issuer. Verified on every request — no caching, no bypasses.
-- **bcrypt password storage.** Cost 12. Plaintext passwords never reach the service except over HTTPS during login, and never appear in logs.
-- **Constant-time login.** Bcrypt is run even on unknown emails to avoid leaking user existence via timing.
-- **Login rate limiting.** Per-IP, default 10 attempts per 15 minutes.
-- **Per-user rate limits** for listing (60/h) and exports (10/h), keyed on `req.user.id` after auth.
-- **Role check** runs after auth; missing/disallowed role → 403.
+- **Token verification on every request.** No bypasses. The optional cache is off by default and capped at 60s when on.
+- **Role check** runs after verification; missing/disallowed role → 403.
 - **CORS** is an exact-origin allowlist. No wildcards. No credentials.
 - **`helmet()`** applied with defaults.
+- **Rate limits** are per-user (or per-IP for unauthenticated calls), via `express-rate-limit` keyed on `req.user.id || req.ip`. Default: 60 list calls/h, 10 exports/h.
 - **Input validation:** `tableIds` must match `^[A-Za-z0-9_-]{1,64}$`, capped at `MAX_TABLES_PER_EXPORT`, and must exist in NocoDB. Tables exceeding `MAX_ROWS_PER_TABLE` return `413` before any streaming starts.
-- **Audit logging:** one JSON line per authenticated request to stdout, plus dedicated `login_succeeded` / `login_failed` / `logout` events. Tokens, password, and the NocoDB API token are redacted.
+- **Audit logging:** one JSON line per authenticated request to stdout, including user id/email/role, table ids, row counts, status, IP, user-agent, and request id. Tokens, passwords, and the NocoDB API token are redacted.
 - **CSV formula injection:** cells starting with `= + - @ \t \r` are prefixed with `'` so spreadsheets won't auto-execute them.
 - **Errors:** clients only see a generic message + `requestId`. Stack traces stay in the server log.
 - **Container:** non-root user, multi-stage build, alpine base, no extra packages.
 - **Dependencies:** exact versions pinned; run `npm audit` (`npm run audit`) before each deploy.
-- **Secrets:** all in env. `.env` is gitignored. `JWT_SECRET`, `USERS_JSON`, and `NOCODB_TOKEN` are never logged, never returned to clients.
+- **Secrets:** all in env. `.env` is gitignored. NocoDB token is never logged, never returned to clients.
 
 ### Hardening you may want to add later
 
-- **Rotate `JWT_SECRET`.** Changing it invalidates all outstanding tokens (a feature, not a bug — useful after suspected compromise).
-- **HttpOnly cookies + CSRF tokens** instead of localStorage for the JWT, to remove the XSS risk window.
-- **Token revocation list** (jti + exp), if you ever need server-side logout.
-- **MFA** — add TOTP via `otplib` if the user list grows.
+- **Pre-auth IP rate limit.** Today, every request hits the main backend's verify endpoint once before any per-user limit applies. A small `express-rate-limit` keyed on `req.ip` in front of `auth` would reduce verify-endpoint pressure under bot traffic.
+- **Verification cache** (already supported via `VERIFY_CACHE_TTL_SECONDS`). Turn it on (e.g. 30s) if the main backend's `/me` becomes a hot path.
 - **Sentry/OpenTelemetry** wired to the existing `pino` logger.
 
 ---
@@ -237,15 +251,13 @@ Behavior already wired:
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | Service exits on boot with `Missing required environment variables` | Env var typo in Dokploy | Check the `missing` array in the log line; add the var(s) and redeploy |
-| Service exits with `JWT_SECRET must be at least 32 characters` | Secret too short | `openssl rand -base64 64`, redeploy |
-| Service exits with `USERS_JSON is not valid JSON` | Newlines or unescaped quotes inside the value | Compact the JSON to a single line; verify with `jq`; redeploy |
-| Login always 401 | Wrong password, or hash generated for a different password, or copy-paste lost a character | Re-hash the password with `scripts/hash-password.js`, redeploy |
-| 403 forbidden for a known user | User's `role` isn't in `ALLOWED_ROLES` (case-insensitive) | Fix one or the other |
+| Every request returns 401, even with a known-good token | Wrong `MAIN_BACKEND_URL`, `MAIN_BACKEND_VERIFY_PATH`, or header name; or the main backend is unreachable from this container | Reproduce the verify call from inside the container with `wget`/`curl`; align config to whatever the main backend expects |
+| 401 *only* in production, fine locally | Public URL works locally but the container can't resolve/reach it inside the Docker network | Switch `MAIN_BACKEND_URL` to the internal Docker hostname, or add this service to the main backend's network |
+| 403 forbidden for a valid user | Main backend returns role under a different field, or with different casing | Adjust `AUTH_USER_ROLE_FIELD` and/or `ALLOWED_ROLES` |
 | Browser blocks calls with CORS error | Origin not in `CORS_ORIGINS` (typo, scheme mismatch, trailing slash) | Fix the env var; redeploy |
 | 502 upstream_error on listing tables | NocoDB token wrong or `NOCODB_BASE_ID` wrong | Test: `curl -H "xc-token: $T" $NOCODB_URL/api/v2/meta/bases/$BASE/tables` |
-| 413 payload_too_large | Table exceeds `MAX_ROWS_PER_TABLE` | Filter the data, or raise the limit (raise carefully; this is the memory guardrail) |
-| 429 rate_limited on `/api/auth/login` | Bot or user typo storm | Wait 15 min, or raise `RATE_LIMIT_LOGIN_PER_15MIN` |
-| 429 rate_limited on `/api/exports/*` | User hit hourly quota | Wait, or raise `RATE_LIMIT_*_PER_HOUR` |
+| 413 payload_too_large | Table exceeds `MAX_ROWS_PER_TABLE` | Filter the data, or raise the limit (this is the memory guardrail — raise carefully) |
+| 429 rate_limited | User exceeded their hourly quota | Wait, or raise `RATE_LIMIT_*_PER_HOUR` |
 | Big exports time out at the proxy | Traefik/Cloudflare default timeouts | Lower `MAX_ROWS_PER_TABLE` for users hitting this, or raise proxy read timeouts |
 
 ---
@@ -261,30 +273,23 @@ exports-service/
 ├── Dockerfile
 ├── docker-compose.yml
 ├── package.json
-├── scripts/
-│   └── hash-password.js       # bcrypt helper for USERS_JSON entries
 ├── frontend/
-│   ├── auth.js                # shared token storage + fetch helpers
-│   ├── LoginPage.jsx          # email/password form, calls /api/auth/login
-│   ├── ExportPanel.jsx        # table list + Excel/CSV download + sign-out
-│   └── ExportApp.jsx          # optional one-line drop-in (Login ↔ Panel)
+│   ├── auth.js                # token storage + fetch helpers + 401 redirect
+│   └── ExportPanel.jsx        # table list + Excel/CSV download
 └── src/
     ├── index.js               # entry point
     ├── config.js              # env loading + validation
     ├── logger.js              # pino, JSON, redaction
     ├── server.js              # express app: helmet, cors, routes, error handling
     ├── middleware/
-    │   ├── auth.js            # JWT verification (HS256)
+    │   ├── auth.js            # forwards token to main backend's verify endpoint
     │   ├── requireRole.js     # ALLOWED_ROLES check
     │   ├── auditLog.js        # one JSON line per authenticated request
     │   └── errorHandler.js    # generic client errors, full server-side logs
     ├── routes/
     │   ├── health.js
-    │   ├── auth.js            # login / me / logout
     │   └── exports.js
     └── services/
-        ├── users.js           # USERS_JSON lookup + bcrypt verify
-        ├── jwt.js             # sign + verify
         ├── nocodb.js          # NocoDB v2 API: list, count, paginated iterate
         └── excel.js           # streaming multi-sheet workbook
 ```

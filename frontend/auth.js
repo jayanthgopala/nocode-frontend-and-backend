@@ -1,39 +1,33 @@
 /*
- * Shared auth helpers for the placement-exports frontend.
+ * Shared helpers for the placement-exports frontend.
  *
- * Configuration:
- *   - EXPORTS_BASE_URL is read from window.__EXPORTS_BASE_URL__ if present,
- *     otherwise falls back to the default below. Override at build time
- *     (e.g. set window.__EXPORTS_BASE_URL__ in index.html, or replace this
- *     value before bundling).
- *   - STORAGE_KEY isolates this app's token from the rest of the app.
+ * The MAIN APP (your existing React app) owns login. This service just
+ * trusts the token the main app already issued. Configure two things:
  *
- * Security notes:
- *   - Stores the JWT in localStorage. Convenient, but vulnerable to XSS.
- *     For a hardened deployment, switch the backend to httpOnly cookies +
- *     CSRF tokens and remove the storage helpers from this file.
- *   - Always serve the frontend over HTTPS.
+ *   1. EXPORTS_BASE_URL — the public URL of this service.
+ *   2. getAuthToken()    — read from wherever the main app stores its
+ *                          auth token (localStorage, AuthContext, cookie).
+ *
+ * On 401 we clear nothing locally (the main app's session machinery does
+ * that) and redirect the browser to MAIN_APP_LOGIN_URL.
  */
 
 export const EXPORTS_BASE_URL =
   (typeof window !== 'undefined' && window.__EXPORTS_BASE_URL__) ||
   'https://exports.sumantheluri.tech';
 
-const STORAGE_KEY = 'placement_exports_token';
+export const MAIN_APP_LOGIN_URL =
+  (typeof window !== 'undefined' && window.__MAIN_APP_LOGIN_URL__) ||
+  '/login';
 
+// TODO: replace with the main app's actual token source.
+// Examples:
+//   - localStorage:        localStorage.getItem('authToken')
+//   - AuthContext:         useAuth().token  (call from a hook, not here)
+//   - httpOnly cookie:     return null and use credentials: 'include' below
 export function getAuthToken() {
   if (typeof localStorage === 'undefined') return null;
-  return localStorage.getItem(STORAGE_KEY);
-}
-
-export function storeAuthToken(token) {
-  if (typeof localStorage === 'undefined') return;
-  localStorage.setItem(STORAGE_KEY, token);
-}
-
-export function clearAuthToken() {
-  if (typeof localStorage === 'undefined') return;
-  localStorage.removeItem(STORAGE_KEY);
+  return localStorage.getItem('authToken');
 }
 
 export function authHeaders(extra) {
@@ -53,11 +47,6 @@ export class ApiError extends Error {
   }
 }
 
-/**
- * Inspect a fetch Response. Throws ApiError on failure (after parsing the
- * JSON body if any). On 401 also clears the stored token. Returns the
- * response unchanged on success.
- */
 export async function handleApiResponse(res) {
   if (res.ok) return res;
 
@@ -69,7 +58,9 @@ export async function handleApiResponse(res) {
   }
 
   if (res.status === 401) {
-    clearAuthToken();
+    if (typeof window !== 'undefined') {
+      window.location.href = MAIN_APP_LOGIN_URL;
+    }
     throw new ApiError('unauthorized', 401, body);
   }
 
@@ -84,11 +75,9 @@ export function friendlyMessage(err) {
     case 'unauthorized':
       return 'Your session has expired. Please log in again.';
     case 'forbidden':
-      return 'You do not have permission to perform this action.';
+      return 'You do not have permission to export data.';
     case 'rate_limited':
       return 'Rate limit reached. Please try again in a few minutes.';
-    case 'invalid_credentials':
-      return 'Email or password is incorrect.';
     case 'invalid_table_id':
       return 'One of the selected tables is no longer available.';
     case 'table_not_found':
@@ -121,51 +110,4 @@ export function filenameFromContentDisposition(header, fallback) {
   if (!header) return fallback;
   const m = /filename="?([^";]+)"?/.exec(header);
   return m && m[1] ? m[1] : fallback;
-}
-
-export async function login(email, password) {
-  let res;
-  try {
-    res = await fetch(`${EXPORTS_BASE_URL}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ email, password }),
-    });
-  } catch (_) {
-    throw new ApiError('network_error', 0, null);
-  }
-  await handleApiResponse(res);
-  const body = await res.json();
-  if (!body || !body.token || !body.user) {
-    throw new ApiError('invalid_response', 200, body);
-  }
-  storeAuthToken(body.token);
-  return body.user;
-}
-
-export async function fetchCurrentUser() {
-  let res;
-  try {
-    res = await fetch(`${EXPORTS_BASE_URL}/api/auth/me`, {
-      method: 'GET',
-      headers: authHeaders({ Accept: 'application/json' }),
-    });
-  } catch (_) {
-    throw new ApiError('network_error', 0, null);
-  }
-  await handleApiResponse(res);
-  const body = await res.json();
-  return (body && body.user) || null;
-}
-
-export async function logout() {
-  try {
-    await fetch(`${EXPORTS_BASE_URL}/api/auth/logout`, {
-      method: 'POST',
-      headers: authHeaders({ Accept: 'application/json' }),
-    });
-  } catch (_) {
-    /* best-effort; we still clear locally */
-  }
-  clearAuthToken();
 }

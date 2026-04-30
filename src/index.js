@@ -11,9 +11,8 @@ const server = app.listen(config.port, () => {
     {
       port: config.port,
       env: config.nodeEnv,
-      jwtIssuer: config.jwt.issuer,
-      jwtExpiresIn: config.jwt.expiresIn,
-      userCount: config.users.length,
+      mainBackendVerify: `${config.mainBackend.url}${config.mainBackend.verifyPath}`,
+      verifyCacheSeconds: config.verifyCache.ttlSeconds,
       allowedRoles: config.auth.allowedRoles,
       maxTablesPerExport: config.limits.maxTablesPerExport,
       maxRowsPerTable: config.limits.maxRowsPerTable,

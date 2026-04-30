@@ -8,7 +8,6 @@ const crypto = require('crypto');
 const config = require('./config');
 const logger = require('./logger');
 const healthRoutes = require('./routes/health');
-const authRoutes = require('./routes/auth');
 const exportsRoutes = require('./routes/exports');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
 
@@ -43,7 +42,7 @@ function buildApp() {
       },
       credentials: false,
       methods: ['GET', 'POST', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'X-Request-Id', 'Authorization'],
+      allowedHeaders: ['Content-Type', 'X-Request-Id', config.auth.headerName],
       exposedHeaders: ['Content-Disposition', 'X-Request-Id'],
       maxAge: 600,
     })
@@ -52,7 +51,6 @@ function buildApp() {
   app.use(express.json({ limit: '64kb' }));
 
   app.use('/health', healthRoutes);
-  app.use('/api/auth', authRoutes);
   app.use('/api/exports', exportsRoutes);
 
   app.use(notFound);

@@ -7,8 +7,12 @@ const REQUIRED = [
   'NODE_ENV',
   'PORT',
   'CORS_ORIGINS',
-  'JWT_SECRET',
-  'USERS_JSON',
+  'MAIN_BACKEND_URL',
+  'MAIN_BACKEND_VERIFY_PATH',
+  'AUTH_HEADER_NAME',
+  'AUTH_USER_ID_FIELD',
+  'AUTH_USER_EMAIL_FIELD',
+  'AUTH_USER_ROLE_FIELD',
   'ALLOWED_ROLES',
   'NOCODB_URL',
   'NOCODB_TOKEN',
@@ -54,53 +58,23 @@ for (const origin of corsOrigins) {
 const allowedRoles = listEnv('ALLOWED_ROLES');
 if (allowedRoles.length === 0) fail('ALLOWED_ROLES must contain at least one role');
 
-if (process.env.JWT_SECRET.length < 32) {
-  fail('JWT_SECRET must be at least 32 characters (use `openssl rand -base64 64`)');
-}
-
-let users;
-try {
-  users = JSON.parse(process.env.USERS_JSON);
-} catch (err) {
-  fail('USERS_JSON is not valid JSON', { detail: err.message });
-}
-if (!Array.isArray(users) || users.length === 0) {
-  fail('USERS_JSON must be a non-empty JSON array of {email, passwordHash, role} objects');
-}
-for (const [i, u] of users.entries()) {
-  if (
-    !u ||
-    typeof u !== 'object' ||
-    typeof u.email !== 'string' ||
-    typeof u.passwordHash !== 'string' ||
-    typeof u.role !== 'string' ||
-    !u.email.trim() ||
-    !u.passwordHash.trim() ||
-    !u.role.trim()
-  ) {
-    fail('USERS_JSON entries must each have email, passwordHash, role (non-empty strings)', {
-      index: i,
-    });
-  }
-}
+const verifyCacheTtl = Math.min(60, Math.max(0, intEnv('VERIFY_CACHE_TTL_SECONDS', 0)));
 
 module.exports = {
   nodeEnv: process.env.NODE_ENV,
   port: intEnv('PORT', 3000),
   logLevel: process.env.LOG_LEVEL || 'info',
   corsOrigins,
-  jwt: {
-    secret: process.env.JWT_SECRET,
-    expiresIn: process.env.JWT_EXPIRES_IN || '12h',
-    issuer: process.env.JWT_ISSUER || 'placement-exports',
+  mainBackend: {
+    url: process.env.MAIN_BACKEND_URL.replace(/\/+$/, ''),
+    verifyPath: process.env.MAIN_BACKEND_VERIFY_PATH,
   },
-  users: users.map((u) => ({
-    email: u.email.trim().toLowerCase(),
-    passwordHash: u.passwordHash,
-    role: u.role.trim(),
-    id: u.id ? String(u.id) : u.email.trim().toLowerCase(),
-  })),
   auth: {
+    headerName: process.env.AUTH_HEADER_NAME,
+    headerPrefix: process.env.AUTH_HEADER_PREFIX || '',
+    userIdField: process.env.AUTH_USER_ID_FIELD,
+    userEmailField: process.env.AUTH_USER_EMAIL_FIELD,
+    userRoleField: process.env.AUTH_USER_ROLE_FIELD,
     allowedRoles,
   },
   nocodb: {
@@ -113,6 +87,9 @@ module.exports = {
     maxRowsPerTable: intEnv('MAX_ROWS_PER_TABLE', 100000),
     rateLimitExportsPerHour: intEnv('RATE_LIMIT_EXPORTS_PER_HOUR', 10),
     rateLimitListsPerHour: intEnv('RATE_LIMIT_LISTS_PER_HOUR', 60),
-    rateLimitLoginPer15Min: intEnv('RATE_LIMIT_LOGIN_PER_15MIN', 10),
+  },
+  verifyCache: {
+    ttlSeconds: verifyCacheTtl,
+    enabled: verifyCacheTtl > 0,
   },
 };
