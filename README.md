@@ -204,22 +204,55 @@ In Dokploy's **Deployments** tab, enable the GitHub webhook. Pushes to `main` re
 
 ---
 
-## Frontend integration
+## Calling this service from your frontend
 
-Two drop-in files under `frontend/`:
+This repo ships **no UI** — your existing React app calls these endpoints directly. Send the same auth token the main app already issues; this service forwards it to the main backend's `/api/auth/whoami` for verification.
 
-| File | Purpose |
-| --- | --- |
-| `auth.js` | `EXPORTS_BASE_URL`, `MAIN_APP_LOGIN_URL`, `getAuthToken()`, `authHeaders()`, `handleApiResponse()` (auto-redirects to login on 401), `friendlyMessage()`, `downloadBlob()`. **All config lives here — adjust once.** |
-| `ExportPanel.jsx` | Checkbox list + Excel/CSV download. No login UI. |
+### List tables
 
-What to edit in `auth.js`:
+```js
+const res = await fetch('https://exports.sumantheluri.tech/api/exports/tables', {
+  headers: { Authorization: `Bearer ${token}` },
+});
+const { tables } = await res.json();   // [{ id, name }, ...]
+```
 
-- **`EXPORTS_BASE_URL`** — point at `https://exports.sumantheluri.tech`. Or set `window.__EXPORTS_BASE_URL__` before the bundle loads and leave the file untouched.
-- **`MAIN_APP_LOGIN_URL`** — where to bounce a 401 to (defaults to `/login`).
-- **`getAuthToken()`** — replace the `localStorage.getItem('authToken')` placeholder with whatever the main app uses (auth context, redux, cookie). The token returned here is forwarded as-is to the main backend's verify endpoint, so it must be the same token the main app issues.
+### Multi-sheet Excel
 
-The component handles 401 (redirect via `MAIN_APP_LOGIN_URL`), 403, 429, 413, and network errors with friendly messages.
+```js
+const res = await fetch('https://exports.sumantheluri.tech/api/exports/excel', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token}`,
+  },
+  body: JSON.stringify({ tableIds: ['tbl_xxx', 'tbl_yyy'] }),
+});
+const blob = await res.blob();
+// trigger a browser download from the blob (URL.createObjectURL + <a download>)
+```
+
+### Single-table CSV
+
+```js
+const res = await fetch(
+  `https://exports.sumantheluri.tech/api/exports/csv/${encodeURIComponent(tableId)}`,
+  { headers: { Authorization: `Bearer ${token}` } }
+);
+const blob = await res.blob();
+```
+
+### Status codes to handle
+
+| Status | Meaning | UX |
+| --- | --- | --- |
+| 401 | Token invalid or missing | Bounce to your existing login |
+| 403 | User's role isn't in `ALLOWED_ROLES` | "You don't have permission to export." |
+| 413 | Table exceeds `MAX_ROWS_PER_TABLE` | Show `body.tableName` + `body.rows`, ask user to filter |
+| 429 | Per-user hourly rate limit hit | "Try again later." |
+| 502 | NocoDB upstream is down | "Data source unavailable, try again shortly." |
+
+Error responses always include `requestId` matching the audit log line server-side, useful for debugging.
 
 ---
 
@@ -273,9 +306,6 @@ exports-service/
 ├── Dockerfile
 ├── docker-compose.yml
 ├── package.json
-├── frontend/
-│   ├── auth.js                # token storage + fetch helpers + 401 redirect
-│   └── ExportPanel.jsx        # table list + Excel/CSV download
 └── src/
     ├── index.js               # entry point
     ├── config.js              # env loading + validation
