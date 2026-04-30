@@ -48,6 +48,18 @@ function pickField(obj, field) {
   return undefined;
 }
 
+// Walk common envelope shapes to find the user object.
+// Handles: {user:{...}}, {data:{...}}, {data:{user:{...}}}, or root.
+function unwrapUser(data) {
+  if (!data || typeof data !== 'object') return null;
+  if (data.data && typeof data.data === 'object') {
+    if (data.data.user && typeof data.data.user === 'object') return data.data.user;
+    return data.data;
+  }
+  if (data.user && typeof data.user === 'object') return data.user;
+  return data;
+}
+
 async function verifyToken(token, requestId) {
   const url = `${config.mainBackend.url}${config.mainBackend.verifyPath}`;
   const headers = {
@@ -78,12 +90,8 @@ async function verifyToken(token, requestId) {
     );
     return null;
   }
-  const data = resp.data;
-  if (!data || typeof data !== 'object') return null;
-  const candidate =
-    pickField(data, 'user') && typeof data.user === 'object' ? data.user :
-    pickField(data, 'data') && typeof data.data === 'object' ? data.data :
-    data;
+  const candidate = unwrapUser(resp.data);
+  if (!candidate) return null;
   const id = pickField(candidate, config.auth.userIdField);
   const email = pickField(candidate, config.auth.userEmailField);
   const role = pickField(candidate, config.auth.userRoleField);
