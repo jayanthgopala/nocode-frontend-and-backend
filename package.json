@@ -1,0 +1,27 @@
+{
+  "name": "placement-exports-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Authenticated, role-gated microservice for exporting placement data from NocoDB to Excel/CSV.",
+  "main": "src/index.js",
+  "engines": {
+    "node": "20.x"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "audit": "npm audit --omit=dev --audit-level=high"
+  },
+  "dependencies": {
+    "axios": "1.7.9",
+    "bcryptjs": "2.4.3",
+    "cors": "2.8.5",
+    "dotenv": "16.4.7",
+    "exceljs": "4.4.0",
+    "express": "4.21.2",
+    "express-rate-limit": "7.5.0",
+    "helmet": "8.0.0",
+    "jsonwebtoken": "9.0.2",
+    "pino": "9.5.0"
+  }
+}
